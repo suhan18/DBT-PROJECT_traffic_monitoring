@@ -1,26 +1,35 @@
 # To run this file use the command below (python trial_spark.py doesn't work for me)
-# spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 sliding_spark.py
+# spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.5 stream_spark.py
 
-# Using the concept of Sliding Window to show the difference
-# Doesn't give the best of the results
-# Using a window of 5 seconds and sliding it every 2 seconds
+# Using the concept of Micro Batching from Big Data which gives the most accurate results
+# This is used by spark by default for streaming data
+# Micro batching is not exactly batch processing because what spark does it is it takes a batch of "NEW" data and processes it in a micro second
+
+# How it works:
+# Spark waits for data from Kafka for a micro second.
+# All data received in that interval becomes 1 micro-batch.
+# That micro-batch is processed just like a normal DataFrame.
+# Result is output in almost real-time.
+
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, sum as spark_sum, when, window, lit
-from pyspark.sql.types import StructType, StringType, IntegerType, TimestampType
+from pyspark.sql.functions import from_json, col, sum as spark_sum, when, round, lit
+from pyspark.sql.types import StructType, StringType, IntegerType
 
+# This is just our Spark Session initialization
 spark = SparkSession.builder \
-    .appName("VehicleDataSlidingWindowAnalysis") \
+    .appName("VehicleDataStreamingAnalysis") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
 
-# Schema for Kafka data
+# Define Schema for incoming Kafka data
 schema = StructType() \
     .add("timestamp", StringType()) \
     .add("location", StringType()) \
     .add("vehicle", StringType()) \
     .add("count", IntegerType())
+
 
 # Our Kafka topic names
 getting_data_topic = "vehicle-data" # Topic name for incoming data
@@ -52,8 +61,8 @@ df = spark.readStream \
 # Parse value as JSON
 parsed_df = df.selectExpr("CAST(value AS STRING)") \
     .select(from_json(col("value"), schema).alias("data")) \
-    .select("data.*") \
-    .withColumn("timestamp", col("timestamp").cast(TimestampType())) # Important for window()
+    .select("data.*")
+
 
 # We want to find the count of each vehicle type
 vehicle_counts = parsed_df.withColumn("bike_count", when(col("vehicle") == "bike", col("count")).otherwise(0)) \
@@ -71,9 +80,8 @@ region_df = vehicle_counts.withColumn(
     .otherwise("West")
 )
 
-# Group by Location, Region, and Sliding Window of 5 mins sliding every 2 mins
+# Group by location & region only
 agg_df = region_df.groupBy(
-    window(col("timestamp"), "5 seconds", "2 seconds"),
     col("location"),
     col("region")
 ).agg(
@@ -102,10 +110,12 @@ agg_df = region_df.groupBy(
     .otherwise("High Traffic")
 )
 
+
 # Output to Console
 query = agg_df.writeStream \
     .outputMode("complete") \
     .foreachBatch(send_to_kafka) \
     .start()
+
 
 query.awaitTermination()
